@@ -27,6 +27,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "delay.h"
+#include "lora_at.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,7 +96,20 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-
+  
+  // 初始化LoRa模块
+  Lora_StatusTypeDef lora_status = LORA_Init();
+  if(lora_status == LORA_OK)
+  {
+    // LoRa初始化成功
+    // 可以在这里添加指示灯或调试信息
+  }
+  else
+  {
+    // LoRa初始化失败处理
+    // 可以在这里添加错误处理逻辑
+  }
+  
   /* USER CODE END 2 */
 
   /* Init scheduler */

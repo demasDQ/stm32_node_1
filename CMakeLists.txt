@@ -49,6 +49,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     "BSP/dht11.c"
     "BSP/delay.c"
     "BSP/bh1750.c"
+    "BSP/lora_at.c"  # 添加LoRa驱动源文件
 )
 
 # Add include paths
