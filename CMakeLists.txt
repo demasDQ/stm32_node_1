@@ -46,6 +46,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     "BSP/oled.c"
+    "BSP/dht11.c"
+    "BSP/delay.c"
+    "BSP/bh1750.c"
 )
 
 # Add include paths

@@ -22,15 +22,14 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
 #include "semphr.h"  // 添加信号量头文件
 #include "stream_buffer.h"  // 添加流缓冲区头文件
 #include <string.h>  // 添加string.h头文件以使用memcpy函数
 #include "usart.h"   // 添加usart头文件以使用huart1
 #include "adc.h"     // 添加ADC头文件以使用ADC功能
-
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
-
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -50,7 +49,13 @@
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
-
+/* Definitions for sensorTask */
+osThreadId_t sensorTaskHandle;
+const osThreadAttr_t sensorTask_attributes = {
+  .name = "sensorTask",
+  .stack_size = 256 * 4,
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -85,14 +90,6 @@ const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityNormal,
-};
-
-/* Definitions for sensorTask */
-osThreadId_t sensorTaskHandle;
-const osThreadAttr_t sensorTask_attributes = {
-  .name = "sensorTask",
-  .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal,
 };
 
 /* Private function prototypes -----------------------------------------------*/
@@ -153,12 +150,10 @@ void MX_FREERTOS_Init(void) {
   /* creation of defaultTask */
   defaultTaskHandle = osThreadNew(StartDefaultTask, NULL, &defaultTask_attributes);
 
-  /* creation of sensorTask */
-  sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
-
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */
- 
+   /* creation of sensorTask */
+  sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
   osThreadNew(StartUartProcessTask, NULL, &defaultTask_attributes);
   // 创建串口发送任务
   const osThreadAttr_t uartSendTask_attributes = {
@@ -434,3 +429,4 @@ void send_response_frame(uint8_t cmd_type, uint8_t *data, uint8_t data_len) {
 }
 
 /* USER CODE END Application */
+
