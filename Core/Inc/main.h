@@ -59,14 +59,16 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define DHT11_DATA_Pin GPIO_PIN_1
 #define DHT11_DATA_GPIO_Port GPIOA
-#define fill_led_Pin GPIO_PIN_2
-#define fill_led_GPIO_Port GPIOA
 #define fill_water_Pin GPIO_PIN_3
 #define fill_water_GPIO_Port GPIOA
 #define GY30_SDA_Pin GPIO_PIN_5
 #define GY30_SDA_GPIO_Port GPIOB
 #define GY30_SCL_Pin GPIO_PIN_6
 #define GY30_SCL_GPIO_Port GPIOB
+#define buzer_Pin GPIO_PIN_8
+#define buzer_GPIO_Port GPIOB
+#define fill_led_Pin GPIO_PIN_9
+#define fill_led_GPIO_Port GPIOB
 
 /* USER CODE BEGIN Private defines */
 
