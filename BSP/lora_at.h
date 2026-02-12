@@ -20,7 +20,7 @@ extern "C" {
 
 // LoRa模块默认配置参数 (根据参考代码设置)
 #define LORA_DEFAULT_BANDRATE       9600
-#define LORA_DEFAULT_ADDRESS        0x0001
+#define LORA_DEFAULT_ADDRESS        0x0002
 #define LORA_DEFAULT_NETID          0
 #define LORA_DEFAULT_CHANNEL        0
 #define LORA_DEFAULT_TRANS_MODE     1  // 点对点传输模式
