@@ -34,7 +34,11 @@
 #include "bh1750.h"  // 添加BH1750头文件以使用光照传感器
 #include "delay.h"   // 添加delay头文件以使用延时函数
 #include "oled.h"    // 添加OLED头文件以使用显示屏
+#include "dma.h"     // 添加DMA头文件以使用hdma_usart1_rx
 /* USER CODE END Includes */
+
+/* External DMA handle declaration */
+extern DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
@@ -82,8 +86,13 @@ const osThreadAttr_t oledDisplayTask_attributes = {
 
 /* Private variables ---------------------------------------------------------*/
 /* USER CODE BEGIN Variables */
+
 StreamBufferHandle_t xStreamBufferUart;  // 串口流缓冲句柄
-uint8_t rx_data_buffer[1];               // 全局接收缓冲区
+
+// DMA接收相关定义
+#define UART_DMA_RX_BUFFER_SIZE 256
+uint8_t dma_rx_buffer[UART_DMA_RX_BUFFER_SIZE]; // DMA接收缓冲区
+volatile uint16_t dma_last_pos = 0; // 上次处理到的位置
 
 // 协议帧结构体定义
 typedef struct {
@@ -120,10 +129,8 @@ const osThreadAttr_t defaultTask_attributes = {
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
-void StartUartReceiveTask(void *argument);
 void StartUartProcessTask(void *argument);
 void StartSensorTask(void *argument);
-void StartUartReception(void);
 uint8_t calculate_checksum(uint8_t *data, uint8_t len);
 uint8_t parse_command_frame(uint8_t *buffer, size_t length, ProtocolFrame_t *frame);
 void send_response_frame(uint8_t cmd_type, uint8_t *data, uint8_t data_len);
@@ -140,12 +147,18 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   * @retval None
   */
 void MX_FREERTOS_Init(void) {
-  /* USER CODE BEGIN Init */
-  // 创建流缓冲区
-  xStreamBufferUart = xStreamBufferCreate(STREAM_BUFFER_SIZE, TRIGGER_LEVEL);
-  if(xStreamBufferUart == NULL){
-    Error_Handler();  // 如果创建失败则报错
-  }
+    /* USER CODE BEGIN Init */
+    // 创建流缓冲区
+    xStreamBufferUart = xStreamBufferCreate(STREAM_BUFFER_SIZE, TRIGGER_LEVEL);
+    if(xStreamBufferUart == NULL){
+        Error_Handler();  // 如果创建失败则报错
+    }
+
+    // 启动USART1 DMA接收
+    dma_last_pos = 0;
+    HAL_UART_Receive_DMA(&huart1, dma_rx_buffer, UART_DMA_RX_BUFFER_SIZE);
+    // 使能IDLE中断
+    __HAL_UART_ENABLE_IT(&huart1, UART_IT_IDLE);
   /* USER CODE END Init */
 
   /* USER CODE BEGIN RTOS_MUTEX */
@@ -363,114 +376,120 @@ void StartSensorTask(void *argument)
     }
 }
 
-// 数据处理任务 - 从流缓冲区读取数据并解析帧
+// 新版数据处理任务 - 状态机逐字节解析帧，支持粘包/乱序/丢包
+typedef enum {
+    FRAME_STATE_IDLE = 0,
+    FRAME_STATE_HEADER,
+    FRAME_STATE_CMD,
+    FRAME_STATE_LEN,
+    FRAME_STATE_DATA,
+    FRAME_STATE_CHECKSUM,
+    FRAME_STATE_TAIL
+} FrameParseState_t;
+
+typedef struct {
+    FrameParseState_t state;
+    uint8_t buffer[MAX_FRAME_LENGTH];
+    uint8_t length;
+    uint8_t data_len;
+    uint8_t checksum;
+    uint8_t data_index;
+} FrameParser_t;
+
+static FrameParser_t g_frame_parser;
+
+static void reset_frame_parser(void) {
+    memset(&g_frame_parser, 0, sizeof(g_frame_parser));
+    g_frame_parser.state = FRAME_STATE_IDLE;
+}
+
 void StartUartProcessTask(void *argument)
 {
-    uint8_t temp_buffer[MAX_FRAME_LENGTH]; // 临时缓冲区用于存储可能的完整帧
-    size_t received_bytes;
-    ProtocolFrame_t frame;
-
+    uint8_t rx_buffer[64];
+    int len = 0;
+    reset_frame_parser();
     for(;;)
     {
-        // 尝试读取至少最小帧长度的数据
-        received_bytes = xStreamBufferReceive(xStreamBufferUart, temp_buffer, FRAME_MIN_LENGTH, pdMS_TO_TICKS(100));
-        
-        if(received_bytes >= FRAME_MIN_LENGTH)
-        {
-            // 检查是否有足够的数据构成完整帧（包括可能的数据字段）
-            if(temp_buffer[0] == CMD_FRAME_HEADER) // 验证帧头
-            {
-                uint8_t expected_length = FRAME_MIN_LENGTH + temp_buffer[2]; // 帧头+命令类型+数据长度+校验和+帧尾+数据域
-                
-                // 如果当前接收的数据不足一帧，尝试接收剩余部分
-                if(received_bytes < expected_length)
-                {
-                    size_t remaining_bytes = expected_length - received_bytes;
-                    size_t additional_bytes = xStreamBufferReceive(xStreamBufferUart, 
-                                                                 &temp_buffer[received_bytes], 
-                                                                 remaining_bytes, 
-                                                                 pdMS_TO_TICKS(100));
-                    
-                    if(additional_bytes == remaining_bytes)
-                    {
-                        received_bytes = expected_length;
-                    }
-                    else
-                    {
-                        // 没有接收到完整的帧，跳过这个字节并继续
-                        xStreamBufferReceive(xStreamBufferUart, temp_buffer, 1, 0);
-                        continue;
-                    }
-                }
-                
-                // 尝试解析命令帧
-                if(parse_command_frame(temp_buffer, received_bytes, &frame))
-                {
-                    // 根据命令类型处理
-                    if (frame.cmd_type == CMD_TYPE_QUERY)
-                    {
-                        // 查询命令 - 发送传感器数据
-                        send_response_frame(CMD_TYPE_QUERY, NULL, 0);
-                    }
-                    else if (frame.cmd_type == CMD_TYPE_SET)
-                    {
-                        // 设置命令 - 切换为手动模式并读取开关状态
-                        if (frame.data_len >= 2)
-                        {
-                            // 读取两个开关状态
-                            manual_light_state = (frame.data[0] > 0) ? 1 : 0;
-                            manual_water_state = (frame.data[1] > 0) ? 1 : 0;
-                            
-                            // 切换为手动模式
-                            control_mode = 0;
-                            
-                            // 发送确认响应
-                            send_response_frame(CMD_TYPE_SET, NULL, 0);
+        len = xStreamBufferReceive(xStreamBufferUart, rx_buffer, sizeof(rx_buffer), pdMS_TO_TICKS(20));
+        if (len > 0) {
+            for (int i = 0; i < len; i++) {
+                uint8_t byte = rx_buffer[i];
+                switch (g_frame_parser.state) {
+                    case FRAME_STATE_IDLE:
+                        if (byte == CMD_FRAME_HEADER) {
+                            g_frame_parser.buffer[0] = byte;
+                            g_frame_parser.length = 1;
+                            g_frame_parser.state = FRAME_STATE_CMD;
                         }
-                    }
-                    else
-                    {
-                        // 未知命令类型，发送错误响应
-                        uint8_t error_data[1] = {0xFF}; // 错误代码
-                        send_response_frame(frame.cmd_type, error_data, 1);
-                    }
+                        break;
+                    case FRAME_STATE_CMD:
+                        g_frame_parser.buffer[g_frame_parser.length++] = byte;
+                        g_frame_parser.state = FRAME_STATE_LEN;
+                        break;
+                    case FRAME_STATE_LEN:
+                        g_frame_parser.buffer[g_frame_parser.length++] = byte;
+                        g_frame_parser.data_len = byte;
+                        g_frame_parser.data_index = 0;
+                        if (g_frame_parser.data_len > (MAX_FRAME_LENGTH-5)) {
+                            reset_frame_parser();
+                        } else if (g_frame_parser.data_len == 0) {
+                            g_frame_parser.state = FRAME_STATE_CHECKSUM;
+                        } else {
+                            g_frame_parser.state = FRAME_STATE_DATA;
+                        }
+                        break;
+                    case FRAME_STATE_DATA:
+                        g_frame_parser.buffer[g_frame_parser.length++] = byte;
+                        g_frame_parser.data_index++;
+                        if (g_frame_parser.data_index >= g_frame_parser.data_len) {
+                            g_frame_parser.state = FRAME_STATE_CHECKSUM;
+                        }
+                        break;
+                    case FRAME_STATE_CHECKSUM:
+                        g_frame_parser.buffer[g_frame_parser.length++] = byte;
+                        g_frame_parser.checksum = byte;
+                        g_frame_parser.state = FRAME_STATE_TAIL;
+                        break;
+                    case FRAME_STATE_TAIL:
+                        g_frame_parser.buffer[g_frame_parser.length++] = byte;
+                        if (byte == CMD_FRAME_TAIL) {
+                            // 校验和校验
+                            uint8_t calc_sum = 0;
+                            for (int k = 0; k < g_frame_parser.length-2; k++) {
+                                calc_sum += g_frame_parser.buffer[k];
+                            }
+                            if (calc_sum == g_frame_parser.checksum) {
+                                // 直接处理帧
+                                uint8_t cmd_type = g_frame_parser.buffer[1];
+                                uint8_t data_len = g_frame_parser.buffer[2];
+                                uint8_t *data = &g_frame_parser.buffer[3];
+                                if (cmd_type == CMD_TYPE_QUERY) {
+                                    send_response_frame(CMD_TYPE_QUERY, NULL, 0);
+                                } else if (cmd_type == CMD_TYPE_SET) {
+                                    if (data_len >= 2) {
+                                        manual_light_state = (data[0] > 0) ? 1 : 0;
+                                        manual_water_state = (data[1] > 0) ? 1 : 0;
+                                        control_mode = 0;
+                                        send_response_frame(CMD_TYPE_SET, NULL, 0);
+                                    }
+                                } else {
+                                    uint8_t error_data[1] = {0xFF};
+                                    send_response_frame(cmd_type, error_data, 1);
+                                }
+                            }
+                        }
+                        reset_frame_parser();
+                        break;
+                    default:
+                        reset_frame_parser();
+                        break;
                 }
             }
-            else
-            {
-                // 帧头不匹配，跳过这个字节
-                xStreamBufferReceive(xStreamBufferUart, temp_buffer, 1, 0);
-            }
         }
-        else
-        {
-            // 超时没有接收到足够数据，继续等待
-            continue;
-        }
+        vTaskDelay(5 / portTICK_PERIOD_MS);
     }
 }
 
-// 启动串口接收中断的函数
-void StartUartReception(void) {
-  // 启动UART接收中断，每次接收一个字节
-  HAL_UART_Receive_IT(&huart1, (uint8_t*)rx_data_buffer, 1);
-}
-
-// 重写HAL库的UART接收完成回调函数
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-  BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  
-  if(huart->Instance == USART1) {
-    // 将接收到的数据写入流缓冲区
-    xStreamBufferSendFromISR(xStreamBufferUart, (void*)rx_data_buffer, 1, &xHigherPriorityTaskWoken);
-    
-    // 继续启动下一次接收
-    HAL_UART_Receive_IT(&huart1, (uint8_t*)rx_data_buffer, 1);
-    
-    // 如果高优先级任务被唤醒，则需要执行上下文切换
-    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
-  }
-}
 
 // 计算校验和函数
 uint8_t calculate_checksum(uint8_t *data, uint8_t len) {
@@ -481,53 +500,6 @@ uint8_t calculate_checksum(uint8_t *data, uint8_t len) {
     return sum; // 简单的累加和校验
 }
 
-// 解析命令帧函数
-uint8_t parse_command_frame(uint8_t *buffer, size_t length, ProtocolFrame_t *frame) {
-    if(buffer == NULL || frame == NULL || length < FRAME_MIN_LENGTH) {
-        return 0; // 帧太短，不是有效帧
-    }
-
-    // 验证帧头
-    if(buffer[0] != CMD_FRAME_HEADER) {
-        return 0; // 帧头不匹配
-    }
-
-    // 获取命令类型和数据长度
-    frame->cmd_type = buffer[1];
-    frame->data_len = buffer[2];
-    
-    // 计算期望的帧长度（包括帧尾）
-    uint8_t expected_length = 4 + frame->data_len; // 帧头+命令类型+数据长度+数据域+校验和+帧尾
-    
-    if(length != (size_t)expected_length) {
-        return 0; // 长度不匹配
-    }
-
-    // 验证帧尾
-    if(buffer[3 + frame->data_len] != CMD_FRAME_TAIL) {
-        return 0; // 帧尾不匹配
-    }
-
-    // 复制数据域
-    for(int i = 0; i < frame->data_len && i < MAX_FRAME_LENGTH-5; i++) {
-        frame->data[i] = buffer[3+i];
-    }
-    
-    // 提取校验和
-    frame->checksum = buffer[3 + frame->data_len];
-
-    // 验证校验和（从帧头到校验和，不包含帧尾）
-    uint8_t calculated_checksum = calculate_checksum(buffer, 3 + frame->data_len);
-    if(calculated_checksum != frame->checksum) {
-        return 0; // 校验和错误
-    }
-
-    // 设置帧头和帧尾
-    frame->header = buffer[0];
-    frame->tail = CMD_FRAME_TAIL;
-
-    return 1; // 解析成功
-}
 
 // 发送响应帧函数
 void send_response_frame(uint8_t cmd_type, uint8_t *data, uint8_t data_len) {
@@ -654,4 +626,37 @@ void StartOledDisplayTask(void *argument)
     }
 }
 /* USER CODE END Application */
+
+// USART1空闲中断处理函数：将DMA缓冲区有效数据写入FreeRTOS流缓冲区
+void USART1_IdleLine_IRQHandler(void)
+{
+    uint16_t dma_curr_pos = UART_DMA_RX_BUFFER_SIZE - __HAL_DMA_GET_COUNTER(&hdma_usart1_rx); // 当前写入位置
+    uint16_t data_len = 0;
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+
+    if (dma_curr_pos >= UART_DMA_RX_BUFFER_SIZE) dma_curr_pos = 0; // 防止越界
+
+    if (dma_curr_pos != dma_last_pos)
+    {
+        if (dma_curr_pos > dma_last_pos)
+        {
+            // 无环绕，直接拷贝
+            data_len = dma_curr_pos - dma_last_pos;
+            xStreamBufferSendFromISR(xStreamBufferUart, &dma_rx_buffer[dma_last_pos], data_len, &xHigherPriorityTaskWoken);
+        }
+        else
+        {
+            // 发生环绕，先拷贝末尾，再拷贝起始
+            data_len = UART_DMA_RX_BUFFER_SIZE - dma_last_pos;
+            xStreamBufferSendFromISR(xStreamBufferUart, &dma_rx_buffer[dma_last_pos], data_len, &xHigherPriorityTaskWoken);
+            if (dma_curr_pos > 0)
+            {
+                xStreamBufferSendFromISR(xStreamBufferUart, &dma_rx_buffer[0], dma_curr_pos, &xHigherPriorityTaskWoken);
+            }
+        }
+        dma_last_pos = dma_curr_pos;
+    }
+
+    portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
+}
 
