@@ -35,14 +35,13 @@
 #include "delay.h"   // 添加delay头文件以使用延时函数
 #include "oled.h"    // 添加OLED头文件以使用显示屏
 #include "dma.h"     // 添加DMA头文件以使用hdma_usart1_rx
+#include "lora_at.h" // 添加LoRa AT指令头文件以在帧里包含LORA模块地址ID
 /* USER CODE END Includes */
-
-/* External DMA handle declaration */
-extern DMA_HandleTypeDef hdma_usart1_rx;
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+/* External DMA handle declaration */
+extern DMA_HandleTypeDef hdma_usart1_rx;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -82,6 +81,13 @@ const osThreadAttr_t oledDisplayTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityLow,
 };
+/* Definitions for uartProcessTask */
+osThreadId_t uartProcessTaskHandle;
+const osThreadAttr_t uartProcessTask_attributes = {
+    .name = "uartProcessTask",
+    .stack_size = 512 * 4,
+    .priority = (osPriority_t) osPriorityAboveNormal,
+};
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -108,13 +114,16 @@ typedef struct {
 uint8_t control_mode = 1;           // 控制模式：1=自动，0=手动
 uint8_t manual_light_state = 0;     // 手动模式下的补光状态
 uint8_t manual_water_state = 0;     // 手动模式下的补水状态
+uint8_t manual_buzer_state = 0;     // 手动模式下蜂鸣器状态
 
 // 传感器初始化结果变量
 uint8_t dht11_init_result = 0;      // DHT11传感器初始化结果 (0:成功, 非0:失败)
 
 // 传感器任务相关变量
-uint16_t adc_raw_value = 0;              // ADC原始值
+uint16_t adc_raw_value = 0;              // ADC最新原始值（DMA单次）
 float adc_voltage_value = 0.0f;          // 转换后的电压值
+uint16_t adc_dma_buffer[16] = {0};       // ADC DMA采样缓冲区（多点平均）
+uint8_t adc_dma_sample_count = 16;       // 采样点数
 uint8_t dht11_temperature = 0;           // DHT11温度值
 uint8_t dht11_humidity = 0;              // DHT11湿度值
 uint32_t bh1750_light_value = 0;         // BH1750光照值
@@ -147,7 +156,7 @@ void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
   * @retval None
   */
 void MX_FREERTOS_Init(void) {
-    /* USER CODE BEGIN Init */
+  /* USER CODE BEGIN Init */
     // 创建流缓冲区
     xStreamBufferUart = xStreamBufferCreate(STREAM_BUFFER_SIZE, TRIGGER_LEVEL);
     if(xStreamBufferUart == NULL){
@@ -185,7 +194,7 @@ void MX_FREERTOS_Init(void) {
   /* add threads, ... */
    /* creation of sensorTask */
   sensorTaskHandle = osThreadNew(StartSensorTask, NULL, &sensorTask_attributes);
-  osThreadNew(StartUartProcessTask, NULL, &defaultTask_attributes);
+  uartProcessTaskHandle = osThreadNew(StartUartProcessTask, NULL, &uartProcessTask_attributes);
   /* creation of oledDisplayTask */
   oledDisplayTaskHandle = osThreadNew(StartOledDisplayTask, NULL, &oledDisplayTask_attributes);
   /* USER CODE END RTOS_THREADS */
@@ -221,9 +230,8 @@ void StartDefaultTask(void *argument)
 // 传感器读取任务 - 包含ADC读取和校准
 void StartSensorTask(void *argument)
 {
+    // ADC采样相关变量
     uint32_t adc_raw_sum = 0;
-    uint8_t adc_readings_count = 0;
-    const uint8_t NUM_READINGS = 10;  // 平均值采样次数
     
     uint8_t dht11_read_result = 0;    // DHT11读取结果
     static uint8_t sensor_init_done = 0; // 传感器初始化标志
@@ -240,8 +248,8 @@ void StartSensorTask(void *argument)
         Error_Handler(); // 校准失败，进入错误处理
     }
 
-    // 启动ADC并开始DMA转换
-    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adc_raw_value, 1) != HAL_OK)
+    // 启动ADC DMA多点采集
+    if (HAL_ADC_Start_DMA(&hadc1, (uint32_t*)adc_dma_buffer, adc_dma_sample_count) != HAL_OK)
     {
         Error_Handler(); // 启动转换失败，进入错误处理
     }
@@ -267,30 +275,18 @@ void StartSensorTask(void *argument)
             sensor_init_done = 1;
         }
         
-        // 读取ADC值
-        adc_raw_value = HAL_ADC_GetValue(&hadc1); // 从DMA缓冲区获取最新ADC值
-        
-        // 累加ADC值用于平均计算
-        adc_raw_sum += adc_raw_value;
-        adc_readings_count++;
-
-        // 当达到指定采样数时，计算平均值并转换为电压值
-        if (adc_readings_count >= NUM_READINGS)
-        {
-            // 计算平均ADC值
-            uint16_t avg_adc_value = adc_raw_sum / NUM_READINGS;
-            
-            // 将ADC值转换为电压值 (假设参考电压为3.3V，分辨率为12位)
-            adc_voltage_value = ((float)avg_adc_value * 3.3f) / 4096.0f;
-            
-            // 重置计数器
-            adc_raw_sum = 0;
-            adc_readings_count = 0;
+        // 采集一组DMA数据后求平均
+        adc_raw_sum = 0;
+        for (uint8_t i = 0; i < adc_dma_sample_count; i++) {
+            adc_raw_sum += adc_dma_buffer[i];
         }
+        uint16_t avg_adc_value = adc_raw_sum / adc_dma_sample_count;
+        adc_raw_value = avg_adc_value; // 记录最新平均值
+        adc_voltage_value = ((float)avg_adc_value * 3.3f) / 4096.0f;
         
-        // 读取DHT11温湿度传感器数据（每2秒读取一次）
+        // 读取DHT11温湿度传感器数据（每100ms读取一次）
         static uint32_t dht11_timer = 0;
-        if (HAL_GetTick() - dht11_timer >= 2000) // 2秒间隔
+        if (HAL_GetTick() - dht11_timer >= 100) // 100ms间隔
         {
             if (dht11_init_result == 0) // 只有初始化成功才读取
             {
@@ -305,9 +301,9 @@ void StartSensorTask(void *argument)
             dht11_timer = HAL_GetTick();
         }
         
-        // 读取BH1750光照传感器数据（每1秒读取一次）
+        // 读取BH1750光照传感器数据（每200ms读取一次）
         static uint32_t bh1750_timer = 0;
-        if (HAL_GetTick() - bh1750_timer >= 1000) // 1秒间隔
+        if (HAL_GetTick() - bh1750_timer >= 200) // 200ms间隔
         {
 
                 bh1750_light_value = Value_GY30(); // 读取光照强度值
@@ -353,22 +349,19 @@ void StartSensorTask(void *argument)
         {
             // 根据手动状态设置GPIO
             if (manual_light_state == 1)
-            {
                 HAL_GPIO_WritePin(fill_led_GPIO_Port, fill_led_Pin, GPIO_PIN_SET);
-            }
             else
-            {
                 HAL_GPIO_WritePin(fill_led_GPIO_Port, fill_led_Pin, GPIO_PIN_RESET);
-            }
-            
+
             if (manual_water_state == 1)
-            {
                 HAL_GPIO_WritePin(fill_water_GPIO_Port, fill_water_Pin, GPIO_PIN_SET);
-            }
             else
-            {
                 HAL_GPIO_WritePin(fill_water_GPIO_Port, fill_water_Pin, GPIO_PIN_RESET);
-            }
+
+            if (manual_buzer_state == 1)
+                HAL_GPIO_WritePin(buzer_GPIO_Port, buzer_Pin, GPIO_PIN_SET);
+            else
+                HAL_GPIO_WritePin(buzer_GPIO_Port, buzer_Pin, GPIO_PIN_RESET);
         }
 
         // 传感器读取间隔 - 例如每100ms读取一次
@@ -466,9 +459,10 @@ void StartUartProcessTask(void *argument)
                                 if (cmd_type == CMD_TYPE_QUERY) {
                                     send_response_frame(CMD_TYPE_QUERY, NULL, 0);
                                 } else if (cmd_type == CMD_TYPE_SET) {
-                                    if (data_len >= 2) {
+                                    if (data_len >= 3) {
                                         manual_light_state = (data[0] > 0) ? 1 : 0;
                                         manual_water_state = (data[1] > 0) ? 1 : 0;
+                                        manual_buzer_state = (data[2] > 0) ? 1 : 0;
                                         control_mode = 0;
                                         send_response_frame(CMD_TYPE_SET, NULL, 0);
                                     }
@@ -501,79 +495,83 @@ uint8_t calculate_checksum(uint8_t *data, uint8_t len) {
 }
 
 
-// 发送响应帧函数
+// 发送响应帧函数（带边界检查）
 void send_response_frame(uint8_t cmd_type, uint8_t *data, uint8_t data_len) {
     uint8_t response_frame[MAX_FRAME_LENGTH];
     uint8_t index = 0;
 
-    // 构建响应帧
-    response_frame[index++] = CMD_FRAME_HEADER;  // 帧头
-    response_frame[index++] = cmd_type;          // 命令类型（保持原样）
-    response_frame[index++] = data_len;          // 数据长度
+    // 帧头、命令类型、占位的数据长度（稍后更新）
+    response_frame[index++] = CMD_FRAME_HEADER;
+    response_frame[index++] = cmd_type;
+    response_frame[index++] = 0; // 占位
 
-    // 如果是查询命令，添加传感器数据
-    if (cmd_type == CMD_TYPE_QUERY)
+    if (cmd_type == CMD_TYPE_QUERY || cmd_type == CMD_TYPE_SET)
     {
-        // 计算传感器数据长度：节点ID(1) + ADC原始值(2) + ADC电压值(4) + DHT11温度(1) + DHT11湿度(1) + BH1750光照值(4) + 控制模式(1) + 手动状态(2) + 实际开关状态(2)
-        uint8_t sensor_data_len = 1 + 2 + 4 + 1 + 1 + 4 + 1 + 2 + 2;  // 总共18字节数据
-        
-        // 添加节点ID (0x01)
-        response_frame[index++] = 0x01;
-        
-        // 添加ADC原始值 (16位)
-        response_frame[index++] = (uint8_t)(adc_raw_value >> 8);    // 高字节
-        response_frame[index++] = (uint8_t)(adc_raw_value & 0xFF);  // 低字节
-        
-        // 添加ADC电压值 (32位浮点数)
-        union {
-            float f;
-            uint8_t bytes[4];
-        } voltage_union;
-        voltage_union.f = adc_voltage_value;
-        response_frame[index++] = voltage_union.bytes[0];
-        response_frame[index++] = voltage_union.bytes[1];
-        response_frame[index++] = voltage_union.bytes[2];
-        response_frame[index++] = voltage_union.bytes[3];
-        
-        // 添加DHT11温度值
-        response_frame[index++] = dht11_temperature;
-        
-        // 添加DHT11湿度值
-        response_frame[index++] = dht11_humidity;
-        
-        // 添加BH1750光照值 (32位)
-        response_frame[index++] = (uint8_t)(bh1750_light_value >> 24);  // 最高字节
-        response_frame[index++] = (uint8_t)(bh1750_light_value >> 16);
-        response_frame[index++] = (uint8_t)(bh1750_light_value >> 8);
-        response_frame[index++] = (uint8_t)(bh1750_light_value & 0xFF); // 最低字节
-        
-        // 添加控制模式
-        response_frame[index++] = control_mode;
-        
-        // 添加实际的GPIO开关状态
+        uint8_t sensor_data_len = 2 + 4 + 1 + 1 + 4 + 1 + 3; // 18
+        if (sensor_data_len > (MAX_FRAME_LENGTH - 5)) {
+            sensor_data_len = MAX_FRAME_LENGTH - 5;
+        }
+        // 更新长度字段
+        response_frame[2] = sensor_data_len;
+
+        // 节点ID (2)
+        if (index + 2 <= MAX_FRAME_LENGTH - 2) {
+            response_frame[index++] = (uint8_t)(LORA_DEFAULT_ADDRESS >> 8);
+            response_frame[index++] = (uint8_t)(LORA_DEFAULT_ADDRESS & 0xFF);
+        }
+
+        // ADC 电压 (float -> 4 bytes)
+        union { float f; uint8_t b[4]; } vu;
+        vu.f = adc_voltage_value;
+        for (int i = 0; i < 4 && index < MAX_FRAME_LENGTH - 2; i++) response_frame[index++] = vu.b[i];
+
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = dht11_temperature;
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = dht11_humidity;
+
+        // BH1750 光照 (4 bytes)
+        if (index + 4 <= MAX_FRAME_LENGTH - 2) {
+            response_frame[index++] = (uint8_t)(bh1750_light_value >> 24);
+            response_frame[index++] = (uint8_t)(bh1750_light_value >> 16);
+            response_frame[index++] = (uint8_t)(bh1750_light_value >> 8);
+            response_frame[index++] = (uint8_t)(bh1750_light_value & 0xFF);
+        }
+
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = control_mode;
+
+        // 实际GPIO状态
         uint8_t actual_light_state = (HAL_GPIO_ReadPin(fill_led_GPIO_Port, fill_led_Pin) == GPIO_PIN_SET) ? 1 : 0;
         uint8_t actual_water_state = (HAL_GPIO_ReadPin(fill_water_GPIO_Port, fill_water_Pin) == GPIO_PIN_SET) ? 1 : 0;
-        response_frame[index++] = actual_light_state;
-        response_frame[index++] = actual_water_state;
-        
-        data_len = sensor_data_len;
+        uint8_t actual_buzer_state = (HAL_GPIO_ReadPin(buzer_GPIO_Port, buzer_Pin) == GPIO_PIN_SET) ? 1 : 0;
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = actual_light_state;
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = actual_water_state;
+        if (index < MAX_FRAME_LENGTH - 2) response_frame[index++] = actual_buzer_state;
     }
     else
     {
-        // 添加传入的数据
-        for(int i = 0; i < data_len && i < MAX_FRAME_LENGTH-4; i++) {
+        // 拷贝入参数据（受限边界）
+        for (int i = 0; i < data_len && index < MAX_FRAME_LENGTH - 2; i++) {
             response_frame[index++] = data[i];
         }
+        // 更新长度字段为实际拷贝的字节数
+        response_frame[2] = (uint8_t)((index > 3) ? (index - 3) : 0);
     }
 
     // 计算并添加校验和
     uint8_t checksum = calculate_checksum(response_frame, index);
-    response_frame[index++] = checksum;
-    
-    // 添加帧尾
-    response_frame[index++] = CMD_FRAME_TAIL;
+    if (index < MAX_FRAME_LENGTH - 1) {
+        response_frame[index++] = checksum;
+    } else {
+        response_frame[MAX_FRAME_LENGTH - 2] = checksum;
+    }
 
-    // 通过UART发送响应
+    // 添加帧尾
+    if (index < MAX_FRAME_LENGTH) {
+        response_frame[index++] = CMD_FRAME_TAIL;
+    } else {
+        response_frame[MAX_FRAME_LENGTH - 1] = CMD_FRAME_TAIL;
+        index = MAX_FRAME_LENGTH;
+    }
+
     HAL_UART_Transmit(&huart1, response_frame, index, HAL_MAX_DELAY);
 }
 
@@ -625,8 +623,6 @@ void StartOledDisplayTask(void *argument)
         osDelay(2000);
     }
 }
-/* USER CODE END Application */
-
 // USART1空闲中断处理函数：将DMA缓冲区有效数据写入FreeRTOS流缓冲区
 void USART1_IdleLine_IRQHandler(void)
 {
@@ -659,4 +655,5 @@ void USART1_IdleLine_IRQHandler(void)
 
     portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
+/* USER CODE END Application */
 

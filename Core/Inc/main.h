@@ -61,6 +61,10 @@ void Error_Handler(void);
 #define DHT11_DATA_GPIO_Port GPIOA
 #define fill_water_Pin GPIO_PIN_3
 #define fill_water_GPIO_Port GPIOA
+#define M0_Pin GPIO_PIN_11
+#define M0_GPIO_Port GPIOA
+#define M1_Pin GPIO_PIN_12
+#define M1_GPIO_Port GPIOA
 #define GY30_SDA_Pin GPIO_PIN_5
 #define GY30_SDA_GPIO_Port GPIOB
 #define GY30_SCL_Pin GPIO_PIN_6

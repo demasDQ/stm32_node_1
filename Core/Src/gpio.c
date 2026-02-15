@@ -53,7 +53,7 @@ void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(DHT11_DATA_GPIO_Port, DHT11_DATA_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(fill_water_GPIO_Port, fill_water_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, fill_water_Pin|M0_Pin|M1_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GY30_SDA_Pin|GY30_SCL_Pin, GPIO_PIN_SET);
@@ -68,12 +68,12 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(DHT11_DATA_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : fill_water_Pin */
-  GPIO_InitStruct.Pin = fill_water_Pin;
+  /*Configure GPIO pins : fill_water_Pin M0_Pin M1_Pin */
+  GPIO_InitStruct.Pin = fill_water_Pin|M0_Pin|M1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(fill_water_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : GY30_SDA_Pin GY30_SCL_Pin */
   GPIO_InitStruct.Pin = GY30_SDA_Pin|GY30_SCL_Pin;

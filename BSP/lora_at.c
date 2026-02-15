@@ -232,65 +232,57 @@ Lora_StatusTypeDef LORA_SetURxT(uint8_t urxt)
   * @param  None
   * @retval Lora_StatusTypeDef: 操作状态
   */
+
+// M0/M1控制宏定义（如未定义请在合适位置定义）
+#ifndef LORA_M0
+#define LORA_M0(x) HAL_GPIO_WritePin(GPIOA, M0_Pin, (x) ? GPIO_PIN_SET : GPIO_PIN_RESET)
+#endif
+#ifndef LORA_M1
+#define LORA_M1(x) HAL_GPIO_WritePin(GPIOA, M1_Pin, (x) ? GPIO_PIN_SET : GPIO_PIN_RESET)
+#endif
+
+typedef enum {
+    LORA_MODE_TRANSFER = 0,
+    LORA_MODE_WOR,
+    LORA_MODE_CFG,
+    LORA_MODE_SLEEP
+} Lora_Mode_t;
+
+static void LORA_SetMode(Lora_Mode_t mode)
+{
+    switch(mode){
+        case LORA_MODE_TRANSFER: LORA_M0(0); LORA_M1(0); break;
+        case LORA_MODE_WOR:      LORA_M0(1); LORA_M1(0); break;
+        case LORA_MODE_CFG:      LORA_M0(0); LORA_M1(1); break;
+        case LORA_MODE_SLEEP:    LORA_M0(1); LORA_M1(1); break;
+        default: break;
+    }
+    LORA_DelayMs(100);
+}
+
 Lora_StatusTypeDef LORA_Init(void)
 {
     Lora_StatusTypeDef status;
-    
-    // 1. 测试模块连接
+
+    // 1. 切换到配置模式
+    LORA_SetMode(LORA_MODE_CFG);
+    LORA_DelayMs(100);
+
+    // 2. 测试模块连接
     status = LORA_TestConnection();
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 2. 设置UART参数: 9600bps, 无校验
-    status = LORA_SetUART(3, 0);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 3. 设置模块地址
-    status = LORA_SetAddress(LORA_DEFAULT_ADDRESS);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 4. 设置网络ID
-    status = LORA_SetNetID(LORA_DEFAULT_NETID);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 5. 设置通信信道
-    status = LORA_SetChannel(LORA_DEFAULT_CHANNEL);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 6. 设置传输模式: 点对点
-    status = LORA_SetTransMode(LORA_DEFAULT_TRANS_MODE);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
-    // 7. 设置UART帧超时
-    status = LORA_SetURxT(LORA_DEFAULT_URXT);
-    if(status != LORA_OK)
-    {
-        return LORA_ERROR;
-    }
-    LORA_DelayMs(LORA_CMD_DELAY_MS);
-    
+    if(status != LORA_OK) return LORA_ERROR;
+
+    // 3. 配置参数
+    if (LORA_SetUART(3, 0) != LORA_OK) return LORA_ERROR;
+    if (LORA_SetAddress(LORA_DEFAULT_ADDRESS) != LORA_OK) return LORA_ERROR;
+    if (LORA_SetNetID(LORA_DEFAULT_NETID) != LORA_OK) return LORA_ERROR;
+    if (LORA_SetChannel(LORA_DEFAULT_CHANNEL) != LORA_OK) return LORA_ERROR;
+    if (LORA_SetTransMode(LORA_DEFAULT_TRANS_MODE) != LORA_OK) return LORA_ERROR;
+    if (LORA_SetURxT(LORA_DEFAULT_URXT) != LORA_OK) return LORA_ERROR;
+
+    // 4. 切换到传输模式
+    LORA_SetMode(LORA_MODE_TRANSFER);
+    LORA_DelayMs(100);
+
     return LORA_OK;
 }
